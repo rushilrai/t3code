@@ -9,19 +9,18 @@ const WINDOW_STATE_VERSION = 1;
 const WINDOW_VISIBILITY_THRESHOLD = 0.2;
 const WINDOW_STATE_PERSIST_DEBOUNCE_MS = 250;
 
-type PersistedWindowMode = "normal" | "maximized";
+type PersistedWindowRestoreMode = "normal" | "maximized" | "fullscreen-origin";
 
 interface PersistedWindowState {
   readonly version: 1;
-  readonly bounds: Rectangle;
-  readonly mode: PersistedWindowMode;
-  readonly restoreAsMaximizedFromFullScreen: boolean;
+  readonly normalBounds: Rectangle;
+  readonly restoreMode: PersistedWindowRestoreMode;
+  readonly fullscreenOriginBounds?: Rectangle;
 }
 
 export interface ResolvedWindowState {
   readonly bounds: Rectangle;
-  readonly mode: PersistedWindowMode;
-  readonly restoreAsMaximizedFromFullScreen: boolean;
+  readonly restoreMode: PersistedWindowRestoreMode;
 }
 
 interface LoadWindowStateParams {
@@ -44,8 +43,33 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function isPersistedWindowMode(value: unknown): value is PersistedWindowMode {
-  return value === "normal" || value === "maximized";
+function isPersistedWindowRestoreMode(value: unknown): value is PersistedWindowRestoreMode {
+  return value === "normal" || value === "maximized" || value === "fullscreen-origin";
+}
+
+function parseRectangle(value: unknown): Rectangle | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const { x, y, width, height } = value as Record<string, unknown>;
+  if (
+    !isFiniteNumber(x) ||
+    !isFiniteNumber(y) ||
+    !isFiniteNumber(width) ||
+    !isFiniteNumber(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    x,
+    y,
+    width,
+    height,
+  };
 }
 
 function parsePersistedWindowState(raw: string): PersistedWindowState | null {
@@ -60,47 +84,42 @@ function parsePersistedWindowState(raw: string): PersistedWindowState | null {
     return null;
   }
 
-  const { version, bounds, mode, restoreAsMaximizedFromFullScreen } = parsed as {
+  const { version, normalBounds, restoreMode, fullscreenOriginBounds } = parsed as {
     version?: unknown;
-    bounds?: Record<string, unknown>;
-    mode?: unknown;
-    restoreAsMaximizedFromFullScreen?: unknown;
+    normalBounds?: Record<string, unknown>;
+    restoreMode?: unknown;
+    fullscreenOriginBounds?: Record<string, unknown>;
   };
 
-  if (
-    version !== WINDOW_STATE_VERSION ||
-    !isPersistedWindowMode(mode) ||
-    typeof restoreAsMaximizedFromFullScreen !== "boolean"
-  ) {
+  if (version !== WINDOW_STATE_VERSION || !isPersistedWindowRestoreMode(restoreMode)) {
     return null;
   }
 
-  if (typeof bounds !== "object" || bounds === null) {
+  const parsedNormalBounds = parseRectangle(normalBounds);
+  if (!parsedNormalBounds) {
     return null;
   }
 
-  const { x, y, width, height } = bounds;
-  if (
-    !isFiniteNumber(x) ||
-    !isFiniteNumber(y) ||
-    !isFiniteNumber(width) ||
-    !isFiniteNumber(height) ||
-    width <= 0 ||
-    height <= 0
-  ) {
+  let parsedFullscreenOriginBounds: Rectangle | undefined;
+  if (fullscreenOriginBounds !== undefined) {
+    const parsedBounds = parseRectangle(fullscreenOriginBounds);
+    if (!parsedBounds) {
+      return null;
+    }
+    parsedFullscreenOriginBounds = parsedBounds;
+  }
+
+  if (restoreMode === "fullscreen-origin" && parsedFullscreenOriginBounds === undefined) {
     return null;
   }
 
   return {
     version: WINDOW_STATE_VERSION,
-    bounds: {
-      x,
-      y,
-      width,
-      height,
-    },
-    mode,
-    restoreAsMaximizedFromFullScreen,
+    normalBounds: parsedNormalBounds,
+    restoreMode,
+    ...(parsedFullscreenOriginBounds
+      ? { fullscreenOriginBounds: parsedFullscreenOriginBounds }
+      : {}),
   };
 }
 
@@ -158,17 +177,15 @@ function buildDefaultWindowState(
 
   return {
     bounds: centerBoundsInDisplay(primaryDisplay.workArea, width, height),
-    mode: "normal",
-    restoreAsMaximizedFromFullScreen: false,
+    restoreMode: "normal",
   };
 }
 
 function readRestorableWindowState(window: BrowserWindow): PersistedWindowState {
   return {
     version: WINDOW_STATE_VERSION,
-    bounds: window.getBounds(),
-    mode: window.isMaximized() ? "maximized" : "normal",
-    restoreAsMaximizedFromFullScreen: false,
+    normalBounds: window.getNormalBounds(),
+    restoreMode: window.isMaximized() ? "maximized" : "normal",
   };
 }
 
@@ -207,15 +224,31 @@ export function loadWindowState({
     return fallback;
   }
 
-  const bounds = sanitizeBounds(parsed.bounds, minWidth, minHeight);
-  if (!isWindowVisibleEnough(bounds)) {
+  const normalBounds = sanitizeBounds(parsed.normalBounds, minWidth, minHeight);
+  if (!isWindowVisibleEnough(normalBounds)) {
     return fallback;
   }
 
+  if (parsed.restoreMode === "fullscreen-origin") {
+    const fullscreenOriginBoundsRaw = parsed.fullscreenOriginBounds;
+    if (!fullscreenOriginBoundsRaw) {
+      return fallback;
+    }
+
+    const fullscreenOriginBounds = sanitizeBounds(fullscreenOriginBoundsRaw, minWidth, minHeight);
+    if (!isWindowVisibleEnough(fullscreenOriginBounds)) {
+      return fallback;
+    }
+
+    return {
+      bounds: fullscreenOriginBounds,
+      restoreMode: "fullscreen-origin",
+    };
+  }
+
   return {
-    bounds,
-    mode: parsed.mode,
-    restoreAsMaximizedFromFullScreen: parsed.restoreAsMaximizedFromFullScreen,
+    bounds: normalBounds,
+    restoreMode: parsed.restoreMode,
   };
 }
 
@@ -225,17 +258,19 @@ export function attachWindowStatePersistence({
 }: AttachWindowStatePersistenceParams): void {
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let lastRestorableState = readRestorableWindowState(window);
+  let lastVisibleBounds = window.getBounds();
 
   const resolvePersistedWindowState = (): PersistedWindowState => {
     if (window.isFullScreen()) {
       return {
         ...lastRestorableState,
-        mode: "maximized",
-        restoreAsMaximizedFromFullScreen: true,
+        restoreMode: "fullscreen-origin",
+        fullscreenOriginBounds: lastVisibleBounds,
       };
     }
 
     lastRestorableState = readRestorableWindowState(window);
+    lastVisibleBounds = window.getBounds();
     return lastRestorableState;
   };
 

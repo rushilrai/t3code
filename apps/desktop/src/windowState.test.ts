@@ -80,6 +80,10 @@ function createTempDir(): string {
   return FS.mkdtempSync(Path.join(OS.tmpdir(), "t3-window-state-"));
 }
 
+function readPersistedWindowState(dir: string) {
+  return JSON.parse(FS.readFileSync(Path.join(dir, "window-state.json"), "utf8"));
+}
+
 describe("windowState", () => {
   const defaultBounds = {
     x: 0,
@@ -126,8 +130,7 @@ describe("windowState", () => {
         width: 1100,
         height: 780,
       },
-      mode: "normal",
-      restoreAsMaximizedFromFullScreen: false,
+      restoreMode: "normal",
     });
   });
 
@@ -141,7 +144,7 @@ describe("windowState", () => {
         defaultBounds,
         minWidth: 840,
         minHeight: 620,
-      }).mode,
+      }).restoreMode,
     ).toBe("normal");
 
     const invalidVersionDir = createTempDir();
@@ -149,8 +152,8 @@ describe("windowState", () => {
       Path.join(invalidVersionDir, "window-state.json"),
       JSON.stringify({
         version: 2,
-        bounds: { x: 10, y: 10, width: 1200, height: 800 },
-        mode: "maximized",
+        normalBounds: { x: 10, y: 10, width: 1200, height: 800 },
+        restoreMode: "maximized",
       }),
       "utf8",
     );
@@ -161,7 +164,7 @@ describe("windowState", () => {
         defaultBounds,
         minWidth: 840,
         minHeight: 620,
-      }).mode,
+      }).restoreMode,
     ).toBe("normal");
   });
 
@@ -171,9 +174,8 @@ describe("windowState", () => {
       Path.join(dir, "window-state.json"),
       JSON.stringify({
         version: 1,
-        bounds: { x: 10, y: 20, width: 300, height: 200 },
-        mode: "normal",
-        restoreAsMaximizedFromFullScreen: false,
+        normalBounds: { x: 10, y: 20, width: 300, height: 200 },
+        restoreMode: "normal",
       }),
       "utf8",
     );
@@ -191,7 +193,7 @@ describe("windowState", () => {
       width: 840,
       height: 620,
     });
-    expect(result.restoreAsMaximizedFromFullScreen).toBe(false);
+    expect(result.restoreMode).toBe("normal");
   });
 
   it("accepts partially visible bounds when enough of the window remains on-screen", () => {
@@ -204,9 +206,8 @@ describe("windowState", () => {
       Path.join(dir, "window-state.json"),
       JSON.stringify({
         version: 1,
-        bounds: { x: 820, y: 50, width: 850, height: 700 },
-        mode: "maximized",
-        restoreAsMaximizedFromFullScreen: false,
+        normalBounds: { x: 820, y: 50, width: 850, height: 700 },
+        restoreMode: "maximized",
       }),
       "utf8",
     );
@@ -225,8 +226,7 @@ describe("windowState", () => {
         width: 850,
         height: 700,
       },
-      mode: "maximized",
-      restoreAsMaximizedFromFullScreen: false,
+      restoreMode: "maximized",
     });
   });
 
@@ -240,9 +240,8 @@ describe("windowState", () => {
       Path.join(dir, "window-state.json"),
       JSON.stringify({
         version: 1,
-        bounds: { x: 950, y: 50, width: 400, height: 400 },
-        mode: "maximized",
-        restoreAsMaximizedFromFullScreen: false,
+        normalBounds: { x: 950, y: 50, width: 400, height: 400 },
+        restoreMode: "maximized",
       }),
       "utf8",
     );
@@ -261,31 +260,29 @@ describe("windowState", () => {
         width: 1100,
         height: 780,
       },
-      mode: "normal",
-      restoreAsMaximizedFromFullScreen: false,
+      restoreMode: "normal",
     });
   });
 
-  it("persists fullscreen sessions as maximized using normal bounds", () => {
+  it("persists fullscreen-origin restores separately from normal maximized state", () => {
     const fullscreenDir = createTempDir();
     const fullscreenWindow = new FakeBrowserWindow(
       { x: 100, y: 120, width: 1200, height: 900 },
       true,
       true,
     );
+    fullscreenWindow.setCurrentBounds({ x: 60, y: 40, width: 1400, height: 850 });
     attachWindowStatePersistence({
       window: fullscreenWindow as never,
       userDataPath: fullscreenDir,
     });
     fullscreenWindow.emit("close");
 
-    expect(
-      JSON.parse(FS.readFileSync(Path.join(fullscreenDir, "window-state.json"), "utf8")),
-    ).toEqual({
+    expect(readPersistedWindowState(fullscreenDir)).toEqual({
       version: 1,
-      bounds: { x: 100, y: 120, width: 1200, height: 900 },
-      mode: "maximized",
-      restoreAsMaximizedFromFullScreen: true,
+      normalBounds: { x: 100, y: 120, width: 1200, height: 900 },
+      restoreMode: "fullscreen-origin",
+      fullscreenOriginBounds: { x: 60, y: 40, width: 1400, height: 850 },
     });
   });
 
@@ -304,11 +301,11 @@ describe("windowState", () => {
     window.emit("enter-full-screen");
     window.emit("close");
 
-    expect(JSON.parse(FS.readFileSync(Path.join(dir, "window-state.json"), "utf8"))).toEqual({
+    expect(readPersistedWindowState(dir)).toEqual({
       version: 1,
-      bounds: { x: 40, y: 32, width: 1392, height: 842 },
-      mode: "maximized",
-      restoreAsMaximizedFromFullScreen: true,
+      normalBounds: { x: 120, y: 90, width: 1280, height: 860 },
+      restoreMode: "fullscreen-origin",
+      fullscreenOriginBounds: { x: 40, y: 32, width: 1392, height: 842 },
     });
   });
 
@@ -325,13 +322,10 @@ describe("windowState", () => {
     });
     maximizedWindow.emit("close");
 
-    expect(
-      JSON.parse(FS.readFileSync(Path.join(maximizedDir, "window-state.json"), "utf8")),
-    ).toEqual({
+    expect(readPersistedWindowState(maximizedDir)).toEqual({
       version: 1,
-      bounds: { x: 40, y: 60, width: 1280, height: 860 },
-      mode: "maximized",
-      restoreAsMaximizedFromFullScreen: false,
+      normalBounds: { x: 40, y: 60, width: 1280, height: 860 },
+      restoreMode: "maximized",
     });
 
     const normalDir = createTempDir();
@@ -342,11 +336,10 @@ describe("windowState", () => {
     });
     normalWindow.emit("close");
 
-    expect(JSON.parse(FS.readFileSync(Path.join(normalDir, "window-state.json"), "utf8"))).toEqual({
+    expect(readPersistedWindowState(normalDir)).toEqual({
       version: 1,
-      bounds: { x: 10, y: 20, width: 900, height: 700 },
-      mode: "normal",
-      restoreAsMaximizedFromFullScreen: false,
+      normalBounds: { x: 10, y: 20, width: 900, height: 700 },
+      restoreMode: "normal",
     });
   });
 
@@ -363,14 +356,12 @@ describe("windowState", () => {
 
     window.emit("close");
 
-    expect(JSON.parse(FS.readFileSync(Path.join(dir, "window-state.json"), "utf8")).bounds).toEqual(
-      {
-        x: 22,
-        y: 44,
-        width: 1000,
-        height: 720,
-      },
-    );
+    expect(readPersistedWindowState(dir).normalBounds).toEqual({
+      x: 22,
+      y: 44,
+      width: 1000,
+      height: 720,
+    });
   });
 
   it("persists debounced move and resize updates", () => {
@@ -386,14 +377,12 @@ describe("windowState", () => {
     expect(FS.existsSync(Path.join(dir, "window-state.json"))).toBe(false);
 
     vi.advanceTimersByTime(1);
-    expect(JSON.parse(FS.readFileSync(Path.join(dir, "window-state.json"), "utf8")).bounds).toEqual(
-      {
-        x: 33,
-        y: 55,
-        width: 1111,
-        height: 777,
-      },
-    );
+    expect(readPersistedWindowState(dir).normalBounds).toEqual({
+      x: 33,
+      y: 55,
+      width: 1111,
+      height: 777,
+    });
   });
 
   it("logs write failures without throwing", () => {

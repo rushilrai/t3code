@@ -1309,11 +1309,11 @@ function createWindow(): BrowserWindow {
     emitUpdateState();
   });
   window.once("ready-to-show", () => {
-    if (initialWindowState.mode === "maximized") {
-      if (initialWindowState.restoreAsMaximizedFromFullScreen) {
-        window.show();
-        return;
-      }
+    if (initialWindowState.restoreMode === "fullscreen-origin") {
+      window.show();
+      return;
+    }
+    if (initialWindowState.restoreMode === "maximized") {
       window.maximize();
     }
     window.show();
